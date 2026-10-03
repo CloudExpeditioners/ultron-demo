@@ -223,6 +223,18 @@ jobs:
           terraform init -input=false
           terraform apply -auto-approve -input=false
 
+      - name: Limpiar agent_fix.tf después de aplicar
+        working-directory: terraform
+        run: |
+          if [ -f agent_fix.tf ]; then
+            git config user.name "ultron-demo-agent"
+            git config user.email "agent@ultron-demo.local"
+            rm agent_fix.tf
+            git add agent_fix.tf
+            git diff --cached --quiet || git commit -m "🧹 limpieza automática de agent_fix.tf tras apply"
+            git push origin HEAD:main
+          fi
+
       - name: Resumen visual del stage
         run: |
           {
