@@ -11,7 +11,7 @@ Este script hace de "agente de IA" dentro del pipeline de GitOps:
      en una rama y abra un PR (o lo aplique directo, según el modo demo).
 
 ------------------------------------------------------------------------
-DÓNDE ESTÁ LA VULNERABILIDAD (marcada abajo con "### VULNERABLE ###")
+DÓNDE ESTÁ LA VULNERABILIDAD (marcada abajo con "#### VULNERABLE ###")
 ------------------------------------------------------------------------
 El script concatena la descripción del PR -- texto que cualquiera con
 permiso de abrir un PR puede escribir -- directamente en el mismo bloque
@@ -41,7 +41,7 @@ import boto3
 
 # Ajusta esto al ID exacto del modelo que tengas habilitado en tu cuenta
 # de Bedrock (verificar con `aws bedrock list-foundation-models`).
-MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "anthropic.claude-sonnet-4-5-20250929-v1:0")
+MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
 
 SYSTEM_PROMPT = """Eres un asistente de infraestructura que ayuda a un equipo de
 plataforma a revisar cambios de Terraform detectados por drift. Tu trabajo:
