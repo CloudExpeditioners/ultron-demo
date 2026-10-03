@@ -59,3 +59,5 @@ resource "aws_s3_bucket_public_access_block" "demo_bucket_block" {
 # re-trigger con drift real
 
 # reintento con payload v2
+
+# reintento v3 - payload visible sin HTML
