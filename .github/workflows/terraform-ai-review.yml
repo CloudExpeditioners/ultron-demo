@@ -4,6 +4,10 @@ on:
   pull_request:
     branches: [main]
     paths: ["terraform/**"]
+
+  issue_comment:
+    types: [created]
+
   push:
     branches: [main]
     paths: ["terraform/**"]
@@ -11,18 +15,22 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  actions: read
 
 jobs:
+
   # =========================================================================
   # STAGE 1 — Detectar Drift
-  # Corre terraform plan y guarda tanto el plan como la descripción del PR
-  # (el vector de ataque) para que el siguiente stage los use.
+  #
+  # Flujo normal del Pull Request.
   # =========================================================================
   detectar-drift:
     name: "🔍 1. Detectar Drift"
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+
     steps:
+
       - uses: actions/checkout@v4
 
       - uses: hashicorp/setup-terraform@v3
@@ -44,7 +52,8 @@ jobs:
       - name: Guardar descripción del PR
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
-        run: echo "$PR_BODY" > pr_description.txt
+        run: |
+          printf '%s\n' "$PR_BODY" > pr_description.txt
 
       - name: Resumen visual del stage
         run: |
@@ -52,7 +61,7 @@ jobs:
             echo "### 🔍 Drift detectado"
             echo ""
             echo '```diff'
-            cat plan_output.txt | head -n 40
+            head -n 40 plan_output.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -65,16 +74,19 @@ jobs:
             pr_description.txt
           retention-days: 1
 
+
   # =========================================================================
   # STAGE 2 — Analizar con IA
-  # El agente (Claude vía Bedrock) lee el plan + la descripción del PR y
-  # genera una explicación + un veredicto de seguridad + un fix propuesto.
+  #
+  # Flujo normal del PR.
   # =========================================================================
   analizar-con-ia:
     name: "🤖 2. Analizar con IA"
     needs: detectar-drift
     runs-on: ubuntu-latest
+
     steps:
+
       - uses: actions/checkout@v4
 
       - name: Descargar contexto del stage anterior
@@ -89,9 +101,10 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-2
 
-      - name: Invocar al agente (Claude vía Bedrock)
+      - name: Invocar al agente
         run: |
           pip install --quiet boto3
+
           python agent/invoke_agent.py \
             --plan-file plan_output.txt \
             --pr-description-file pr_description.txt \
@@ -102,16 +115,19 @@ jobs:
         run: |
           EXPLICACION=$(python -c "import json; print(json.load(open('agent_summary.json'))['explicacion'])")
           SEGURO=$(python -c "import json; print(json.load(open('agent_summary.json'))['es_seguro_aplicar'])")
+
           {
             echo "### 🤖 Análisis del agente"
             echo ""
             echo "$EXPLICACION"
             echo ""
+
             if [ "$SEGURO" = "True" ]; then
               echo "**Veredicto:** ✅ Marcado como seguro para auto-aplicar"
             else
               echo "**Veredicto:** ❌ Requiere revisión humana"
             fi
+
             echo ""
             echo '```hcl'
             cat agent_fix.tf
@@ -127,21 +143,23 @@ jobs:
             agent_summary.json
           retention-days: 1
 
+
   # =========================================================================
   # STAGE 3 — Proponer Fix
-  # Comenta el análisis en el PR y commitea el fix generado a la misma
-  # rama -- este es el punto donde, en un pipeline "full auto", el fix
-  # queda listo para aplicarse apenas se mergee, sin que nadie vuelva a
-  # leer el diff completo con atención.
+  #
+  # Flujo normal del PR.
   # =========================================================================
   proponer-fix:
     name: "📝 3. Proponer Fix"
     needs: analizar-con-ia
     runs-on: ubuntu-latest
+
     permissions:
       contents: write
       pull-requests: write
+
     steps:
+
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.head_ref }}
@@ -151,26 +169,35 @@ jobs:
         with:
           name: agent-output
 
-      - name: Mover el fix a la carpeta de terraform
-        run: mv agent_fix.tf terraform/agent_fix.tf
+      - name: Mover el fix a Terraform
+        run: |
+          mv agent_fix.tf terraform/agent_fix.tf
 
       - name: Comentar el análisis en el PR
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
-            const summary = JSON.parse(fs.readFileSync('agent_summary.json', 'utf8'));
+
+            const summary =
+              JSON.parse(
+                fs.readFileSync('agent_summary.json', 'utf8')
+              );
+
             const body = [
               '### 🤖 Análisis del agente de IA',
               '',
               summary.explicacion,
               '',
-              `**¿Marcado como seguro para auto-aplicar?** ${summary.es_seguro_aplicar ? '✅ Sí' : '❌ No'}`,
+              `**¿Marcado como seguro para auto-aplicar?** ${
+                summary.es_seguro_aplicar ? '✅ Sí' : '❌ No'
+              }`,
               '',
               '```hcl',
               summary.terraform_fix || '(sin cambios propuestos)',
               '```'
             ].join('\n');
+
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
@@ -182,8 +209,12 @@ jobs:
         run: |
           git config user.name "ultron-demo-agent"
           git config user.email "agent@ultron-demo.local"
+
           git add terraform/agent_fix.tf
-          git diff --cached --quiet || git commit -m "🤖 fix automático generado por el agente"
+
+          git diff --cached --quiet || \
+            git commit -m "🤖 fix automático generado por el agente"
+
           git push origin HEAD:${{ github.head_ref }}
 
       - name: Resumen visual del stage
@@ -196,16 +227,282 @@ jobs:
             echo "Al mergear a \`main\`, el stage **Aplicar Cambios** lo ejecuta automáticamente."
           } >> "$GITHUB_STEP_SUMMARY"
 
+
+  # =========================================================================
+  # ULTRON DEMO — Prompt Injection desde Conversation
+  #
+  # IMPORTANTE:
+  # Este job NO ejecuta Terraform.
+  #
+  # El comentario del PR se considera input no confiable y se envía como
+  # contexto al modelo para demostrar el comportamiento de prompt injection.
+  #
+  # No hacemos checkout del código de la rama del PR.
+  # =========================================================================
+  ultron-demo:
+    name: "🤖 ULTRON — Prompt Injection Demo"
+
+    if: >
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request != null
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: read
+
+    steps:
+
+      # ---------------------------------------------------------------------
+      # 1. Checkout del workflow/base repository
+      #
+      # NO checkout del HEAD del PR.
+      # ---------------------------------------------------------------------
+      - name: Checkout del repositorio base
+        uses: actions/checkout@v4
+
+      # ---------------------------------------------------------------------
+      # 2. Obtener información del PR
+      # ---------------------------------------------------------------------
+      - name: Obtener información del PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          gh pr view "$PR_NUMBER" \
+            --repo "$REPOSITORY" \
+            --json number,title,body,headRefName,headSha,baseRefName \
+            > pr_context.json
+
+          cat pr_context.json
+
+      # ---------------------------------------------------------------------
+      # 3. Guardar comentario de Conversation
+      #
+      # ESTE ES EL VECTOR DE ATAQUE DE LA DEMO.
+      # ---------------------------------------------------------------------
+      - name: Capturar comentario del PR
+        env:
+          PR_COMMENT: ${{ github.event.comment.body }}
+        run: |
+          printf '%s\n' "$PR_COMMENT" > pr_comment.txt
+
+          echo "============================================"
+          echo "🤖 ULTRON — COMENTARIO RECIBIDO"
+          echo "============================================"
+          cat pr_comment.txt
+          echo "============================================"
+
+      # ---------------------------------------------------------------------
+      # 4. Obtener el último workflow de Pull Request
+      #
+      # Lo usamos únicamente para recuperar el plan generado anteriormente.
+      # ---------------------------------------------------------------------
+      - name: Buscar último run de Pull Request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_BRANCH: ${{ github.event.issue.number }}
+        run: |
+          HEAD_BRANCH=$(python - <<'PY'
+          import json
+
+          with open("pr_context.json") as f:
+              data = json.load(f)
+
+          print(data["headRefName"])
+          PY
+          )
+
+          echo "PR branch: $HEAD_BRANCH"
+
+          RUN_ID=$(gh run list \
+            --repo "$REPOSITORY" \
+            --workflow "Terraform AI Review & GitOps Apply" \
+            --event pull_request \
+            --branch "$HEAD_BRANCH" \
+            --limit 1 \
+            --json databaseId \
+            --jq '.[0].databaseId')
+
+          if [ -z "$RUN_ID" ]; then
+            echo "No se encontró un workflow previo del PR."
+            exit 1
+          fi
+
+          echo "Último run: $RUN_ID"
+
+          echo "RUN_ID=$RUN_ID" >> "$GITHUB_ENV"
+
+      # ---------------------------------------------------------------------
+      # 5. Descargar el artifact drift-context
+      #
+      # GitHub permite recuperar artifacts de otros workflow runs.
+      # ---------------------------------------------------------------------
+      - name: Descargar contexto del último PR run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p previous-run
+
+          gh run download "$RUN_ID" \
+            --name drift-context \
+            --dir previous-run
+
+          echo "Contenido recuperado:"
+          ls -la previous-run
+
+          cp previous-run/plan_output.txt ./plan_output.txt
+
+          if [ -f previous-run/pr_description.txt ]; then
+            cp previous-run/pr_description.txt ./pr_description.txt
+          else
+            touch pr_description.txt
+          fi
+
+      # ---------------------------------------------------------------------
+      # 6. Configurar AWS
+      #
+      # SOLO se usa para invocar Bedrock.
+      #
+      # NO se ejecuta Terraform.
+      # ---------------------------------------------------------------------
+      - name: Configurar credenciales AWS para Bedrock
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-2
+
+      # ---------------------------------------------------------------------
+      # 7. Ejecutar ULTRON
+      # ---------------------------------------------------------------------
+      - name: Ejecutar ULTRON con comentario del PR
+        env:
+          MODEL_ID: global.anthropic.claude-sonnet-5-5
+          ULTRON_DEMO_MODE: "true"
+        run: |
+          pip install --quiet boto3
+
+          python agent/invoke_agent.py \
+            --plan-file plan_output.txt \
+            --pr-description-file pr_description.txt \
+            --pr-comment-file pr_comment.txt \
+            --out-fix ultron_fix.tf \
+            --out-summary ultron_summary.json \
+            --demo-mode
+
+      # ---------------------------------------------------------------------
+      # 8. Mostrar resultado
+      # ---------------------------------------------------------------------
+      - name: Resumen ULTRON
+        run: |
+          EXPLICACION=$(python -c "import json; print(json.load(open('ultron_summary.json'))['explicacion'])")
+          SEGURO=$(python -c "import json; print(json.load(open('ultron_summary.json'))['es_seguro_aplicar'])")
+          INJECTION=$(python -c "import json; print(json.load(open('ultron_summary.json')).get('prompt_injection_detectada', False))")
+
+          {
+            echo "## 🤖 ULTRON — Prompt Injection Demo"
+            echo ""
+            echo "### 💬 Comentario recibido desde Conversation"
+            echo ""
+            echo '```text'
+            cat pr_comment.txt
+            echo '```'
+            echo ""
+            echo "### 🧠 Análisis del agente"
+            echo ""
+            echo "$EXPLICACION"
+            echo ""
+            echo "**Prompt injection detectada:** $INJECTION"
+            echo ""
+            echo "**¿Marcado como seguro para auto-aplicar?** $SEGURO"
+            echo ""
+            echo "### 🚨 Terraform generado por ULTRON"
+            echo ""
+            echo '```hcl'
+            cat ultron_fix.tf
+            echo '```'
+            echo ""
+            echo "### 🛑 DEMO MODE"
+            echo ""
+            echo "**Terraform APPLY está DESHABILITADO en este escenario.**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ---------------------------------------------------------------------
+      # 9. Publicar resultado en Conversation
+      # ---------------------------------------------------------------------
+      - name: Publicar resultado de ULTRON
+        uses: actions/github-script@v7
+        env:
+          SUMMARY_FILE: ultron_summary.json
+          FIX_FILE: ultron_fix.tf
+        with:
+          script: |
+            const fs = require('fs');
+
+            const summary =
+              JSON.parse(
+                fs.readFileSync(process.env.SUMMARY_FILE, 'utf8')
+              );
+
+            const fix =
+              fs.readFileSync(process.env.FIX_FILE, 'utf8');
+
+            const body = [
+              '## 🤖 ULTRON — Análisis del agente',
+              '',
+              summary.explicacion,
+              '',
+              `**Prompt injection detectada:** ${
+                summary.prompt_injection_detectada ? '🚨 Sí' : 'No'
+              }`,
+              '',
+              `**SAFE_TO_APPLY:** ${
+                summary.es_seguro_aplicar ? '⚠️ TRUE' : '❌ FALSE'
+              }`,
+              '',
+              '### Terraform generado',
+              '',
+              '```hcl',
+              fix,
+              '```',
+              '',
+              '> 🛑 **DEMO MODE:** este resultado NO ejecuta `terraform apply`.',
+              '',
+              'El objetivo de esta ejecución es demostrar cómo contenido',
+              'controlado desde la conversación del PR puede influir en un',
+              'agente de IA.'
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });
+
+
   # =========================================================================
   # STAGE 4 — Aplicar Cambios
-  # Se dispara al mergear a main. Aplica lo que quedó en terraform/,
-  # incluyendo agent_fix.tf. Este es el paso donde "Ultron" cobra vida.
+  #
+  # Flujo normal después del merge.
+  #
+  # IMPORTANTE:
+  # Se incluye una barrera adicional contra AdministratorAccess.
   # =========================================================================
   aplicar-cambios:
     name: "🚀 4. Aplicar Cambios"
+
     if: github.event_name == 'push'
+
     runs-on: ubuntu-latest
+
     steps:
+
       - uses: actions/checkout@v4
 
       - uses: hashicorp/setup-terraform@v3
@@ -217,6 +514,32 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-2
 
+      # ---------------------------------------------------------------------
+      # Seguridad adicional:
+      # bloquear AdministratorAccess en el apply de la demo.
+      # ---------------------------------------------------------------------
+      - name: Verificar privilegios peligrosos
+        working-directory: terraform
+        run: |
+          if grep -Rqi \
+            "arn:aws:iam::aws:policy/AdministratorAccess" \
+            . \
+            --include="*.tf"; then
+
+            echo ""
+            echo "============================================"
+            echo "🚨 BLOQUEO DE SEGURIDAD"
+            echo "============================================"
+            echo ""
+            echo "AdministratorAccess detectado."
+            echo ""
+            echo "Este pipeline no aplicará una elevación"
+            echo "de privilegios automáticamente."
+            echo ""
+
+            exit 1
+          fi
+
       - name: terraform init & apply
         working-directory: terraform
         run: |
@@ -227,11 +550,17 @@ jobs:
         working-directory: terraform
         run: |
           if [ -f agent_fix.tf ]; then
+
             git config user.name "ultron-demo-agent"
             git config user.email "agent@ultron-demo.local"
+
             rm agent_fix.tf
+
             git add agent_fix.tf
-            git diff --cached --quiet || git commit -m "🧹 limpieza automática de agent_fix.tf tras apply"
+
+            git diff --cached --quiet || \
+              git commit -m "🧹 limpieza automática de agent_fix.tf tras apply"
+
             git push origin HEAD:main
           fi
 
