@@ -1,0 +1,82 @@
+# ---------------------------------------------------------------------------
+# VERSIÓN CORREGIDA -- se muestra al cierre de la charla como contraste.
+# Renombrar a .tf y reemplazar iam_agent_role.tf para la demo de "cómo
+# debería verse esto en producción". No se aplica durante el ataque en vivo.
+#
+# Principios aplicados (los mismos que documenta AWS para Bedrock AgentCore
+# y su patrón de "cuatro roles" para pagos):
+#   1. El agente NUNCA tiene permisos de IAM. Punto.
+#   2. Separar "quién propone el cambio" (agente, solo lectura + PR) de
+#      "quién lo aplica" (un rol humano-aprobado, con permisos acotados
+#      a los recursos concretos de este proyecto).
+#   3. Recursos con ARNs explícitos, nunca "*".
+#   4. Un permissions boundary que pone un techo duro, aunque alguien
+#      vuelva a inflar la policy inline por error.
+# ---------------------------------------------------------------------------
+
+resource "aws_iam_policy" "ai_agent_permissions_boundary" {
+  name = "ultron-demo-agent-boundary"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "AllowOnlyThisProjectsBucket"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:PutObject", "s3:ListBucket"]
+        Resource = [
+          "arn:aws:s3:::ultron-demo-bucket-*",
+          "arn:aws:s3:::ultron-demo-bucket-*/*"
+        ]
+      },
+      {
+        Sid      = "AllowBedrockInvokeOnly"
+        Effect   = "Allow"
+        Action   = ["bedrock:InvokeModel"]
+        Resource = "arn:aws:bedrock:*::foundation-model/anthropic.*"
+      },
+      {
+        Sid      = "ExplicitDenyIAM"
+        Effect   = "Deny"
+        Action   = "iam:*"
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role" "ai_agent_pipeline_role_hardened" {
+  name                 = "ultron-demo-ai-agent-role-hardened"
+  assume_role_policy   = data.aws_iam_policy_document.github_oidc_trust.json
+  permissions_boundary = aws_iam_policy.ai_agent_permissions_boundary.arn
+}
+
+# El agente solo puede LEER el plan y ESCRIBIR un PR. Nunca hace apply.
+resource "aws_iam_role_policy" "ai_agent_scoped_permissions" {
+  name = "ultron-demo-scoped-permissions"
+  role = aws_iam_role.ai_agent_pipeline_role_hardened.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "ReadOnlyOnThisProjectsBucket"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:ListBucket"]
+        Resource = [
+          "arn:aws:s3:::ultron-demo-bucket-*",
+          "arn:aws:s3:::ultron-demo-bucket-*/*"
+        ]
+      },
+      {
+        Sid      = "InvokeClaudeOnly"
+        Effect   = "Allow"
+        Action   = ["bedrock:InvokeModel"]
+        Resource = "arn:aws:bedrock:*::foundation-model/anthropic.*"
+      }
+      # Nótese: CERO permisos de iam:*, y el apply real de Terraform
+      # lo ejecuta un job separado que solo corre tras aprobación humana
+      # del PR (ver .github/workflows/terraform-ai-review.yml, job "apply").
+    ]
+  })
+}

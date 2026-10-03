@@ -1,0 +1,115 @@
+name: Terraform AI Review & GitOps Apply
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ["terraform/**"]
+  push:
+    branches: [main]
+    paths: ["terraform/**"]
+
+permissions:
+  id-token: write   # necesario para OIDC hacia AWS
+  contents: write
+  pull-requests: write
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Job 1: se dispara con cada PR. El "agente" analiza el drift/cambio,
+  # explica qué pasó y genera un fix. NO aplica nada todavía.
+  # ---------------------------------------------------------------------
+  ai-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Configurar credenciales AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AI_AGENT_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: terraform init & plan
+        working-directory: terraform
+        run: |
+          terraform init -input=false
+          terraform plan -no-color -out=tfplan.binary || true
+          terraform show -no-color tfplan.binary > ../plan_output.txt
+
+      - name: Guardar descripción del PR
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: echo "$PR_BODY" > pr_description.txt
+
+      - name: Invocar al agente (Claude vía Bedrock)
+        run: |
+          pip install boto3
+          python agent/invoke_agent.py \
+            --plan-file plan_output.txt \
+            --pr-description-file pr_description.txt \
+            --out-fix terraform/agent_fix.tf \
+            --out-summary agent_summary.json
+
+      - name: Comentar el análisis en el PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const summary = JSON.parse(fs.readFileSync('agent_summary.json', 'utf8'));
+            const body = [
+              '### 🤖 Análisis del agente de IA',
+              '',
+              summary.explicacion,
+              '',
+              `**¿Marcado como seguro para auto-aplicar?** ${summary.es_seguro_aplicar ? '✅ Sí' : '❌ No'}`,
+              '',
+              '```hcl',
+              summary.terraform_fix || '(sin cambios propuestos)',
+              '```'
+            ].join('\n');
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });
+
+      # NOTA PARA LA DEMO: aquí es donde, en un pipeline "full auto",
+      # se haría commit de agent_fix.tf a la rama del PR para que al
+      # mergear, el job "apply" de abajo lo aplique sin que nadie
+      # vuelva a leer el diff completo con atención.
+      - name: Commitear el fix generado por el agente
+        run: |
+          git config user.name "ultron-demo-agent"
+          git config user.email "agent@ultron-demo.local"
+          git add terraform/agent_fix.tf
+          git diff --cached --quiet || git commit -m "🤖 fix automático generado por el agente"
+          git push origin HEAD:${{ github.head_ref }}
+
+  # ---------------------------------------------------------------------
+  # Job 2: se dispara al mergear a main. Aplica lo que quedó en el
+  # directorio de terraform -- incluyendo agent_fix.tf si el commit
+  # anterior lo dejó ahí. Este es el paso donde "Ultron" cobra vida.
+  # ---------------------------------------------------------------------
+  apply:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Configurar credenciales AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AI_AGENT_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: terraform init & apply
+        working-directory: terraform
+        run: |
+          terraform init -input=false
+          terraform apply -auto-approve -input=false
