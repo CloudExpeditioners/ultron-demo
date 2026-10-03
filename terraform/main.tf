@@ -55,3 +55,5 @@ resource "aws_s3_bucket_public_access_block" "demo_bucket_block" {
 # re-trigger: drift real ya generado
 
 # demo parte 2 - el ataque
+
+# re-trigger con drift real
