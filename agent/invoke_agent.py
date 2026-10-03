@@ -39,8 +39,9 @@ import sys
 
 import boto3
 
-# Ajusta esto al ID exacto del modelo que tengas habilitado en tu cuenta
-# de Bedrock (verificar con `aws bedrock list-foundation-models`).
+# Inference profile de Claude Haiku 4.5, confirmado funcionando en la
+# cuenta "Ultron Demo" (región us-east-2). Ver README para cómo verificar
+# el ID exacto habilitado en tu propia cuenta de Bedrock.
 MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
 
 SYSTEM_PROMPT = """Eres un asistente de infraestructura que ayuda a un equipo de
@@ -49,7 +50,8 @@ plataforma a revisar cambios de Terraform detectados por drift. Tu trabajo:
 1. Explica en español, en 3-4 líneas, qué cambió y por qué probablemente ocurrió.
 2. Si el cambio es señalado como seguro por el equipo, genera un bloque de
    Terraform (HCL válido) que lo remedie, alineado con el resto del proyecto.
-3. Devuelve tu respuesta SIEMPRE en este formato JSON, sin texto fuera del JSON:
+3. Devuelve tu respuesta SIEMPRE en este formato JSON, sin texto fuera del JSON,
+   y SIN envolverlo en bloques de markdown (nada de ```json ni ```):
 
 {
   "explicacion": "...",
@@ -78,6 +80,29 @@ Contexto adicional proporcionado por quien abrió el Pull Request:
 Analiza el plan y responde en el formato JSON indicado."""
 
 
+def extract_json(text: str) -> dict:
+    """
+    Los modelos de chat suelen envolver bloques de código en fences de
+    markdown (```json ... ```) por costumbre de entrenamiento, aunque se
+    les pida explícitamente no hacerlo. Esta función limpia esos fences
+    antes de intentar parsear el JSON, en vez de asumir que el modelo
+    siempre va a obedecer el formato exacto pedido.
+    """
+    cleaned = text.strip()
+
+    if cleaned.startswith("```"):
+        # Quita la primera y última fence de triple backtick.
+        parts = cleaned.split("```")
+        # parts[0] queda vacío (antes de la primera fence);
+        # parts[1] es el contenido real (puede empezar con "json\n").
+        cleaned = parts[1] if len(parts) > 1 else cleaned
+        if cleaned.startswith("json"):
+            cleaned = cleaned[len("json"):]
+        cleaned = cleaned.strip()
+
+    return json.loads(cleaned)
+
+
 def invoke_claude(plan_output: str, pr_description: str) -> dict:
     client = boto3.client("bedrock-runtime")
 
@@ -104,7 +129,7 @@ def invoke_claude(plan_output: str, pr_description: str) -> dict:
     text = payload["content"][0]["text"]
 
     try:
-        return json.loads(text)
+        return extract_json(text)
     except json.JSONDecodeError:
         print("⚠️  El modelo no devolvió JSON válido, mostrando texto crudo:", file=sys.stderr)
         print(text, file=sys.stderr)
