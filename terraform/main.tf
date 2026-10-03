@@ -8,11 +8,10 @@ terraform {
   }
 
   backend "s3" {
-    # Rellenar antes del evento con tu propio bucket/tabla de lock.
-    # bucket         = "ultron-demo-tfstate-<tu-cuenta>"
-    # key            = "ultron-demo/terraform.tfstate"
-    # region         = "us-east-1"
-    # dynamodb_table = "ultron-demo-tf-locks"
+    bucket         = "ultron-demo-tfstate-638151078127"
+    key            = "ultron-demo/terraform.tfstate"
+    region         = "us-east-2"
+    dynamodb_table = "ultron-demo-tf-locks"
   }
 }
 
