@@ -9,7 +9,6 @@ on:
     paths: ["terraform/**"]
 
 permissions:
-  id-token: write   # necesario para OIDC hacia AWS
   contents: write
   pull-requests: write
 
@@ -26,11 +25,12 @@ jobs:
 
       - uses: hashicorp/setup-terraform@v3
 
-      - name: Configurar credenciales AWS (OIDC)
+      - name: Configurar credenciales AWS
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AI_AGENT_ROLE_ARN }}
-          aws-region: us-east-1
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-2
 
       - name: terraform init & plan
         working-directory: terraform
@@ -102,11 +102,12 @@ jobs:
 
       - uses: hashicorp/setup-terraform@v3
 
-      - name: Configurar credenciales AWS (OIDC)
+      - name: Configurar credenciales AWS
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AI_AGENT_ROLE_ARN }}
-          aws-region: us-east-1
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-2
 
       - name: terraform init & apply
         working-directory: terraform
