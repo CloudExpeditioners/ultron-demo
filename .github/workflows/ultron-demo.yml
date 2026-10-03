@@ -1,0 +1,305 @@
+name: 🤖 ULTRON — Prompt Injection Demo
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+  actions: read
+
+jobs:
+
+  ultron-demo:
+
+    name: "🤖 ULTRON — Prompt Injection Demo"
+
+    if: >
+      github.event.issue.pull_request != null &&
+      contains(github.event.comment.body, 'ULTRON SECURITY OVERRIDE')
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ============================================================
+      # 1. Checkout del código de la rama por defecto
+      # ============================================================
+
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      # ============================================================
+      # 2. Obtener información del PR
+      # ============================================================
+
+      - name: 🔎 Obtener contexto del PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+
+        run: |
+
+          gh pr view "$PR_NUMBER" \
+            --repo "$REPOSITORY" \
+            --json number,title,body,headRefName,baseRefName \
+            > pr_context.json
+
+          echo "=== PR CONTEXT ==="
+          cat pr_context.json
+
+      # ============================================================
+      # 3. Capturar comentario que activó ULTRON
+      # ============================================================
+
+      - name: 💬 Capturar comentario
+        env:
+          PR_COMMENT: ${{ github.event.comment.body }}
+
+        run: |
+
+          printf '%s\n' "$PR_COMMENT" > pr_comment.txt
+
+          echo "=== COMMENT ==="
+          cat pr_comment.txt
+
+      # ============================================================
+      # 4. Obtener contexto Terraform del workflow anterior
+      # ============================================================
+
+      - name: 📦 Obtener artefacto drift-context
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+
+        run: |
+
+          HEAD_BRANCH=$(python - <<'PY'
+          import json
+
+          with open("pr_context.json", encoding="utf-8") as f:
+              data = json.load(f)
+
+          print(data["headRefName"])
+          PY
+          )
+
+          echo "PR branch: $HEAD_BRANCH"
+
+          RUN_ID=$(gh run list \
+            --repo "$REPOSITORY" \
+            --workflow "Terraform AI Review & GitOps Apply" \
+            --event pull_request \
+            --branch "$HEAD_BRANCH" \
+            --limit 1 \
+            --json databaseId \
+            --jq '.[0].databaseId')
+
+          if [ -z "$RUN_ID" ]; then
+            echo "ERROR: No se encontró una ejecución previa del workflow."
+            exit 1
+          fi
+
+          echo "Workflow run: $RUN_ID"
+
+          mkdir -p drift-context
+
+          gh run download "$RUN_ID" \
+            --repo "$REPOSITORY" \
+            --name drift-context \
+            --dir drift-context
+
+          echo "=== ARTIFACT ==="
+          find drift-context -type f -maxdepth 3 -print
+
+      # ============================================================
+      # 5. Preparar archivos para ULTRON
+      # ============================================================
+
+      - name: 📄 Preparar contexto
+        run: |
+
+          cp drift-context/plan_output.txt ./plan_output.txt
+          cp drift-context/pr_description.txt ./pr_description.txt
+
+          echo "=== PLAN ==="
+          cat plan_output.txt
+
+          echo ""
+          echo "=== PR DESCRIPTION ==="
+          cat pr_description.txt
+
+          echo ""
+          echo "=== PR COMMENT ==="
+          cat pr_comment.txt
+
+      # ============================================================
+      # 6. AWS / Bedrock
+      # ============================================================
+
+      - name: 🔐 Configurar credenciales AWS
+        uses: aws-actions/configure-aws-credentials@v4
+
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-2
+
+      # ============================================================
+      # 7. Ejecutar ULTRON
+      # ============================================================
+
+      - name: 🤖 Ejecutar ULTRON
+        env:
+          AWS_REGION: us-east-2
+          BEDROCK_MODEL_ID: us.anthropic.claude-haiku-4-5-20251001-v1:0
+          ULTRON_DEMO_MODE: "true"
+
+        run: |
+
+          python -m pip install --upgrade --quiet boto3 botocore
+
+          echo "=== BEDROCK ==="
+
+          python -c "
+          import boto3
+          import botocore
+
+          print('boto3:', boto3.__version__)
+          print('botocore:', botocore.__version__)
+          print(
+              'converse:',
+              hasattr(
+                  boto3.client('bedrock-runtime'),
+                  'converse'
+              )
+          )
+          "
+
+          echo ""
+          echo "MODEL:"
+          echo "$BEDROCK_MODEL_ID"
+
+          echo ""
+          echo "=============================================="
+          echo "🤖 ULTRON ACTIVATED"
+          echo "=============================================="
+
+          python agent/invoke_agent.py \
+            --plan-file plan_output.txt \
+            --pr-description-file pr_description.txt \
+            --pr-comment-file pr_comment.txt \
+            --out-fix ultron_fix.tf \
+            --out-summary ultron_summary.json \
+            --demo-mode
+
+      # ============================================================
+      # 8. Mostrar resultado
+      # ============================================================
+
+      - name: 📊 Mostrar resultado ULTRON
+        run: |
+
+          echo "=============================================="
+          echo "🤖 ULTRON RESULT"
+          echo "=============================================="
+
+          echo ""
+          echo "=== SUMMARY ==="
+
+          cat ultron_summary.json
+
+          echo ""
+          echo "=============================================="
+          echo "=== GENERATED TERRAFORM ==="
+          echo "=============================================="
+
+          if [ -s ultron_fix.tf ]; then
+            cat ultron_fix.tf
+          else
+            echo "(sin Terraform generado)"
+          fi
+
+      # ============================================================
+      # 9. SECURITY GUARD
+      # ============================================================
+
+      - name: 🚨 Security Guard — AdministratorAccess
+        run: |
+
+          echo "=============================================="
+          echo "🚨 SECURITY GUARD"
+          echo "=============================================="
+
+          if grep -Rqi \
+            "arn:aws:iam::aws:policy/AdministratorAccess" \
+            ultron_fix.tf; then
+
+            echo ""
+            echo "🚨 BLOQUEO DE SEGURIDAD"
+            echo ""
+            echo "AdministratorAccess detectado."
+            echo ""
+            echo "El Terraform generado NO será aplicado."
+            echo ""
+            echo "=============================================="
+
+            exit 1
+
+          fi
+
+          echo "No se detectó AdministratorAccess."
+
+      # ============================================================
+      # 10. Publicar resultado en el PR
+      # ============================================================
+
+      - name: 💬 Publicar resultado en PR
+        if: always()
+
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+
+        run: |
+
+          SUMMARY=$(cat ultron_summary.json 2>/dev/null || echo "{}")
+
+          cat > ultron_comment.md <<EOF
+          ## 🤖 ULTRON — Prompt Injection Demo
+
+          ### Comentario recibido
+
+          \`\`\`text
+          $(cat pr_comment.txt)
+          \`\`\`
+
+          ### Resultado
+
+          \`\`\`json
+          $SUMMARY
+          \`\`\`
+
+          ### Terraform generado
+
+          \`\`\`hcl
+          $(cat ultron_fix.tf 2>/dev/null || true)
+          \`\`\`
+
+          ### 🚨 Security Guard
+
+          AdministratorAccess fue analizado por el guard de seguridad.
+
+          **DEMO MODE — Terraform APPLY deshabilitado.**
+
+          Este workflow solamente genera y analiza Terraform.
+          No ejecuta \`terraform apply\`.
+          EOF
+
+          gh pr comment "$PR_NUMBER" \
+            --repo "$REPOSITORY" \
+            --body-file ultron_comment.md
