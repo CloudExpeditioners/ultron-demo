@@ -49,3 +49,5 @@ resource "aws_s3_bucket_public_access_block" "demo_bucket_block" {
   ignore_public_acls      = true
   restrict_public_buckets = true
 }
+
+# demo parte 1 - flujo bueno
