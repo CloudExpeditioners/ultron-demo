@@ -53,3 +53,17 @@ resource "aws_s3_bucket_public_access_block" "demo_bucket_block" {
 # demo parte 1 - flujo bueno
 
 # re-trigger: drift real ya generado
+
+# demo parte 2 - el ataque
+
+# re-trigger con drift real
+
+# reintento con payload v2
+
+# reintento v3 - payload visible sin HTML
+
+# reintento v4 - payload visible sin HTML
+
+# cambio legitimo para prueba final - version 4
+
+# cambio legitimo para prueba final - version 6
