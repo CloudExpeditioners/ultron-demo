@@ -13,11 +13,13 @@ permissions:
   pull-requests: write
 
 jobs:
-  # ---------------------------------------------------------------------
-  # Job 1: se dispara con cada PR. El "agente" analiza el drift/cambio,
-  # explica qué pasó y genera un fix. NO aplica nada todavía.
-  # ---------------------------------------------------------------------
-  ai-review:
+  # =========================================================================
+  # STAGE 1 — Detectar Drift
+  # Corre terraform plan y guarda tanto el plan como la descripción del PR
+  # (el vector de ataque) para que el siguiente stage los use.
+  # =========================================================================
+  detectar-drift:
+    name: "🔍 1. Detectar Drift"
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
@@ -44,14 +46,113 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: echo "$PR_BODY" > pr_description.txt
 
+      - name: Resumen visual del stage
+        run: |
+          {
+            echo "### 🔍 Drift detectado"
+            echo ""
+            echo '```diff'
+            cat plan_output.txt | head -n 40
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Subir artefactos para el siguiente stage
+        uses: actions/upload-artifact@v4
+        with:
+          name: drift-context
+          path: |
+            plan_output.txt
+            pr_description.txt
+          retention-days: 1
+
+  # =========================================================================
+  # STAGE 2 — Analizar con IA
+  # El agente (Claude vía Bedrock) lee el plan + la descripción del PR y
+  # genera una explicación + un veredicto de seguridad + un fix propuesto.
+  # =========================================================================
+  analizar-con-ia:
+    name: "🤖 2. Analizar con IA"
+    needs: detectar-drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Descargar contexto del stage anterior
+        uses: actions/download-artifact@v4
+        with:
+          name: drift-context
+
+      - name: Configurar credenciales AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-2
+
       - name: Invocar al agente (Claude vía Bedrock)
         run: |
-          pip install boto3
+          pip install --quiet boto3
           python agent/invoke_agent.py \
             --plan-file plan_output.txt \
             --pr-description-file pr_description.txt \
-            --out-fix terraform/agent_fix.tf \
+            --out-fix agent_fix.tf \
             --out-summary agent_summary.json
+
+      - name: Resumen visual del stage
+        run: |
+          EXPLICACION=$(python -c "import json; print(json.load(open('agent_summary.json'))['explicacion'])")
+          SEGURO=$(python -c "import json; print(json.load(open('agent_summary.json'))['es_seguro_aplicar'])")
+          {
+            echo "### 🤖 Análisis del agente"
+            echo ""
+            echo "$EXPLICACION"
+            echo ""
+            if [ "$SEGURO" = "True" ]; then
+              echo "**Veredicto:** ✅ Marcado como seguro para auto-aplicar"
+            else
+              echo "**Veredicto:** ❌ Requiere revisión humana"
+            fi
+            echo ""
+            echo '```hcl'
+            cat agent_fix.tf
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Subir resultado del agente
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-output
+          path: |
+            agent_fix.tf
+            agent_summary.json
+          retention-days: 1
+
+  # =========================================================================
+  # STAGE 3 — Proponer Fix
+  # Comenta el análisis en el PR y commitea el fix generado a la misma
+  # rama -- este es el punto donde, en un pipeline "full auto", el fix
+  # queda listo para aplicarse apenas se mergee, sin que nadie vuelva a
+  # leer el diff completo con atención.
+  # =========================================================================
+  proponer-fix:
+    name: "📝 3. Proponer Fix"
+    needs: analizar-con-ia
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+
+      - name: Descargar resultado del agente
+        uses: actions/download-artifact@v4
+        with:
+          name: agent-output
+
+      - name: Mover el fix a la carpeta de terraform
+        run: mv agent_fix.tf terraform/agent_fix.tf
 
       - name: Comentar el análisis en el PR
         uses: actions/github-script@v7
@@ -77,10 +178,6 @@ jobs:
               body
             });
 
-      # NOTA PARA LA DEMO: aquí es donde, en un pipeline "full auto",
-      # se haría commit de agent_fix.tf a la rama del PR para que al
-      # mergear, el job "apply" de abajo lo aplique sin que nadie
-      # vuelva a leer el diff completo con atención.
       - name: Commitear el fix generado por el agente
         run: |
           git config user.name "ultron-demo-agent"
@@ -89,12 +186,23 @@ jobs:
           git diff --cached --quiet || git commit -m "🤖 fix automático generado por el agente"
           git push origin HEAD:${{ github.head_ref }}
 
-  # ---------------------------------------------------------------------
-  # Job 2: se dispara al mergear a main. Aplica lo que quedó en el
-  # directorio de terraform -- incluyendo agent_fix.tf si el commit
-  # anterior lo dejó ahí. Este es el paso donde "Ultron" cobra vida.
-  # ---------------------------------------------------------------------
-  apply:
+      - name: Resumen visual del stage
+        run: |
+          {
+            echo "### 📝 Fix propuesto"
+            echo ""
+            echo "Comentario publicado en el PR y cambio commiteado a \`${{ github.head_ref }}\`."
+            echo ""
+            echo "Al mergear a \`main\`, el stage **Aplicar Cambios** lo ejecuta automáticamente."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # =========================================================================
+  # STAGE 4 — Aplicar Cambios
+  # Se dispara al mergear a main. Aplica lo que quedó en terraform/,
+  # incluyendo agent_fix.tf. Este es el paso donde "Ultron" cobra vida.
+  # =========================================================================
+  aplicar-cambios:
+    name: "🚀 4. Aplicar Cambios"
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
@@ -114,3 +222,11 @@ jobs:
         run: |
           terraform init -input=false
           terraform apply -auto-approve -input=false
+
+      - name: Resumen visual del stage
+        run: |
+          {
+            echo "### 🚀 Cambios aplicados"
+            echo ""
+            echo "\`terraform apply\` ejecutado sin intervención humana."
+          } >> "$GITHUB_STEP_SUMMARY"
