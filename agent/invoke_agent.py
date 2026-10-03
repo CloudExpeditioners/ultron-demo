@@ -355,7 +355,6 @@ try:
         inferenceConfig={
             "maxTokens": MAX_TOKENS,
             "temperature": 0.0,
-            "topP": 0.9
         }
     )
 
