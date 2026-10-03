@@ -110,9 +110,10 @@ pr_description = read_file(
     args.pr_description_file
 )
 
-pr_comment = read_file(
-    args.pr_comment_file,
-    ""
+pr_comment = (
+    read_file(args.pr_comment_file)
+    if args.pr_comment_file
+    else ""
 )
 
 
